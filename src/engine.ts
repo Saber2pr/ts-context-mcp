@@ -45,16 +45,67 @@ export class PromptEngine {
     }).join("\n");
   }
 
-  getSkeleton(filePath: string) {
-    const sf = this.program.getSourceFile(path.resolve(this.rootDir, filePath));
+  /**
+   * 提取代码骨架 (Skeleton)
+   * 核心逻辑：保留声明签名（Interface, Class, Function, Variable），隐藏大括号内的具体实现。
+   */
+  public getSkeleton(filePath: string): string {
+    const fullPath = path.resolve(this.rootDir, filePath);
+    const sf = this.program.getSourceFile(fullPath);
     if (!sf) return "File not found";
-    let output = "";
-    ts.forEachChild(sf, node => {
-      if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isClassDeclaration(node)) {
-        output += node.getText().split('{')[0] + "{ /* skeleton */ }\n";
+
+    let output = `// Skeleton for ${filePath}\n`;
+
+    const visit = (node: ts.Node) => {
+      // 1. 处理 接口 (Interface) 和 类型别名 (Type Alias)
+      if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+        const header = node.getText().split('{')[0].trim();
+        output += `${header} { /* implementation hidden */ }\n`;
       }
-    });
-    return output || "Logic-only file";
+
+      // 2. 处理 类 (Class)
+      // 注意：这里不直接截断，而是保留类头并递归访问内部成员
+      else if (ts.isClassDeclaration(node)) {
+        const header = node.getText().split('{')[0].trim();
+        output += `${header} {\n`;
+        ts.forEachChild(node, visit); // 递归处理内部的构造函数、方法等
+        output += `}\n`;
+      }
+
+      // 3. 处理 类成员 (方法、构造函数) 或 导出的独立函数
+      else if (
+        (ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isFunctionDeclaration(node)) &&
+        (node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) || ts.isClassElement(node))
+      ) {
+        const signature = node.getText().split('{')[0].trim();
+        // 如果是在类内部，增加缩进
+        const indent = ts.isClassElement(node) ? "  " : "";
+        output += `${indent}${signature}; // implementation hidden\n`;
+      }
+
+      // 4. 处理 变量导出 (export const/let ...)
+      else if (ts.isVariableStatement(node) && node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
+        node.declarationList.declarations.forEach(decl => {
+          const name = decl.name.getText();
+          const type = decl.type ? `: ${decl.type.getText()}` : "";
+          output += `export const ${name}${type}; // variable export\n`;
+        });
+      }
+
+      // 5. 处理 重导出 (export * from ... / export { x } from ...)
+      else if (ts.isExportDeclaration(node)) {
+        const text = node.getText().replace(/;$/, ''); // 安全起见，去掉自带的分号再统一处理
+        output += `${text}; // re-export\n`;
+      }
+
+      // 6. 兜底逻辑：对于其他节点类型（如模块、命名空间），继续向下寻找
+      else {
+        ts.forEachChild(node, visit);
+      }
+    };
+
+    visit(sf);
+    return output || "// No structural definitions found.";
   }
 
   public getDeps(filePath: string) {
@@ -102,5 +153,30 @@ export class PromptEngine {
     return dependencies
       .map(d => `- ${d.raw} -> ${d.resolved || "External/Built-in"}`)
       .join("\n");
+  }
+
+  /**
+   * 精准获取某个类的方法或函数的完整实现
+   */
+  public getMethodImplementation(filePath: string, methodName: string): string {
+    const fullPath = path.resolve(this.rootDir, filePath);
+    const sf = this.program.getSourceFile(fullPath);
+    if (!sf) return "File not found";
+
+    let result = "";
+
+    const visit = (node: ts.Node) => {
+      if (
+        (ts.isMethodDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isConstructorDeclaration(node)) &&
+        node.name?.getText() === methodName
+      ) {
+        result = node.getText(); // 获取包含方法体在内的完整代码
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+
+    visit(sf);
+    return result || `Method '${methodName}' not found in ${filePath}`;
   }
 }

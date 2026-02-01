@@ -90,6 +90,24 @@ server.registerTool(
     }
   }
 );
+
+server.registerTool(
+  "get_method_body",
+  {
+    description: "获取指定文件内某个方法或函数的完整实现代码",
+    inputSchema: {
+      filePath: z.string().describe("文件路径"),
+      methodName: z.string().describe("方法名或函数名"),
+    }
+  },
+  async ({ filePath, methodName }) => {
+    const code = engine.getMethodImplementation(filePath, methodName);
+    return {
+      content: [{ type: "text", text: code }],
+    };
+  }
+);
+
 // 3. 建立连接
 const transport = new StdioServerTransport();
 server.connect(transport);

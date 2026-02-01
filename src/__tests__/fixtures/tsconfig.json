@@ -1,1 +1,1 @@
-{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}
+{"compilerOptions":{"target":"esnext","module":"commonjs","esModuleInterop":true}}
