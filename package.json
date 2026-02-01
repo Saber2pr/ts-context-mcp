@@ -20,7 +20,8 @@
     "test": "vitest",
     "test:dev": "node lib/test",
     "start": "tsc --watch",
-    "prepublishOnly": "tsc",
+    "build": "tsc",
+    "prepublishOnly": "build",
     "lint": "prettier --write ./src",
     "prepare": "husky install"
   },
