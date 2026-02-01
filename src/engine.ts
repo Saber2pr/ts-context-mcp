@@ -45,10 +45,8 @@ export class PromptEngine {
     }).join("\n");
   }
 
-  /**
-   * 提取代码骨架 (Skeleton)
-   * 核心逻辑：保留声明签名（Interface, Class, Function, Variable），隐藏大括号内的具体实现。
-   */
+  // src/engine.ts
+
   public getSkeleton(filePath: string): string {
     const fullPath = path.resolve(this.rootDir, filePath);
     const sf = this.program.getSourceFile(fullPath);
@@ -57,50 +55,65 @@ export class PromptEngine {
     let output = `// Skeleton for ${filePath}\n`;
 
     const visit = (node: ts.Node) => {
-      // 1. 处理 接口 (Interface) 和 类型别名 (Type Alias)
-      if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
-        const header = node.getText().split('{')[0].trim();
-        output += `${header} { /* implementation hidden */ }\n`;
-      }
+      try {
+        // 安全获取文本的辅助函数
+        const getNodeText = (n: ts.Node) => {
+          try { return n.getText(); } catch { return ""; }
+        };
 
-      // 2. 处理 类 (Class)
-      // 注意：这里不直接截断，而是保留类头并递归访问内部成员
-      else if (ts.isClassDeclaration(node)) {
-        const header = node.getText().split('{')[0].trim();
-        output += `${header} {\n`;
-        ts.forEachChild(node, visit); // 递归处理内部的构造函数、方法等
-        output += `}\n`;
-      }
+        // 1. 处理 接口 和 类型别名
+        if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+          const text = getNodeText(node);
+          const header = text ? text.split('{')[0].trim() : "declaration";
+          output += `${header} { /* implementation hidden */ }\n`;
+        }
 
-      // 3. 处理 类成员 (方法、构造函数) 或 导出的独立函数
-      else if (
-        (ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isFunctionDeclaration(node)) &&
-        (node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) || ts.isClassElement(node))
-      ) {
-        const signature = node.getText().split('{')[0].trim();
-        // 如果是在类内部，增加缩进
-        const indent = ts.isClassElement(node) ? "  " : "";
-        output += `${indent}${signature}; // implementation hidden\n`;
-      }
+        // 2. 处理 类
+        else if (ts.isClassDeclaration(node)) {
+          const text = getNodeText(node);
+          const header = text ? text.split('{')[0].trim() : "class";
+          output += `${header} {\n`;
+          ts.forEachChild(node, visit);
+          output += `}\n`;
+        }
 
-      // 4. 处理 变量导出 (export const/let ...)
-      else if (ts.isVariableStatement(node) && node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
-        node.declarationList.declarations.forEach(decl => {
-          const name = decl.name.getText();
-          const type = decl.type ? `: ${decl.type.getText()}` : "";
-          output += `export const ${name}${type}; // variable export\n`;
-        });
-      }
+        // 3. 处理 类成员或函数
+        else if (
+          (ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isFunctionDeclaration(node)) &&
+          (node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) || ts.isClassElement(node))
+        ) {
+          const text = getNodeText(node);
+          const signature = text ? text.split('{')[0].trim() : "method";
+          const indent = ts.isClassElement(node) ? "  " : "";
+          output += `${indent}${signature}; // implementation hidden\n`;
+        }
 
-      // 5. 处理 重导出 (export * from ... / export { x } from ...)
-      else if (ts.isExportDeclaration(node)) {
-        const text = node.getText().replace(/;$/, ''); // 安全起见，去掉自带的分号再统一处理
-        output += `${text}; // re-export\n`;
-      }
+        // 4. 处理 变量导出 (最容易出 undefined 的地方)
+        else if (ts.isVariableStatement(node) && node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
+          node.declarationList.declarations.forEach(decl => {
+            // 增加对 decl.name 的安全检查
+            const name = decl.name ? getNodeText(decl.name) : "unknown";
+            const type = decl.type ? `: ${getNodeText(decl.type)}` : "";
+            output += `export const ${name}${type}; // variable export\n`;
+          });
+        }
 
-      // 6. 兜底逻辑：对于其他节点类型（如模块、命名空间），继续向下寻找
-      else {
-        ts.forEachChild(node, visit);
+        // 5. 处理 重导出
+        else if (ts.isExportDeclaration(node)) {
+          const text = getNodeText(node);
+          if (text) {
+            const formatted = text.replace(/;$/, '');
+            output += `${formatted}; // re-export\n`;
+          }
+        }
+
+        // 6. 递归向下
+        else {
+          ts.forEachChild(node, visit);
+        }
+      } catch (e) {
+        // 如果单个节点解析彻底失败，记录日志但不中断程序
+        output += `// [Parser Error] skipped a node in ${filePath}\n`;
       }
     };
 
@@ -155,9 +168,6 @@ export class PromptEngine {
       .join("\n");
   }
 
-  /**
-   * 精准获取某个类的方法或函数的完整实现
-   */
   public getMethodImplementation(filePath: string, methodName: string): string {
     const fullPath = path.resolve(this.rootDir, filePath);
     const sf = this.program.getSourceFile(fullPath);
@@ -166,17 +176,33 @@ export class PromptEngine {
     let result = "";
 
     const visit = (node: ts.Node) => {
+      if (result) return; // 找到后停止搜索
+
+      // 检查是否为：函数声明、方法声明、构造函数、或者变量声明
       if (
-        (ts.isMethodDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isConstructorDeclaration(node)) &&
-        node.name?.getText() === methodName
+        ts.isFunctionDeclaration(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isConstructorDeclaration(node) ||
+        ts.isVariableDeclaration(node)
       ) {
-        result = node.getText(); // 获取包含方法体在内的完整代码
-        return;
+        // 核心修复：安全地获取节点名称
+        // 某些节点（如匿名函数导出）可能没有 name 属性
+        const nodeName = node.name ? node.name.getText() : undefined;
+
+        if (nodeName === methodName) {
+          try {
+            // 使用 getText() 时也增加 try-catch，防止底层偏移错误
+            result = node.getText();
+          } catch (e) {
+            result = `// Error: Found '${methodName}' but could not retrieve source text.`;
+          }
+          return;
+        }
       }
       ts.forEachChild(node, visit);
     };
 
     visit(sf);
-    return result || `Method '${methodName}' not found in ${filePath}`;
+    return result || `Definition for '${methodName}' not found in ${filePath}`;
   }
 }
