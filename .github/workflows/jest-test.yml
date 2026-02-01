@@ -1,18 +1,18 @@
-name: Jest Tests
+name: Tests
 on:
   workflow_dispatch:
-  # push:
-  #   branches:
-  #     - master
-  #   tags:
-  #     - 'v*.*.*'
-  # pull_request:
-  #   branches:
-  #     - master
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - master
 
 jobs:
-  Jest-Tests:
-    runs-on: ubuntu-18.04
+  Tests:
+    runs-on: ubuntu-test
     steps:
       - name: Checkout
         uses: actions/checkout@v2
@@ -22,9 +22,3 @@ jobs:
 
       - name: Run Tests
         run: yarn test
-
-      - name: Upload Coverage
-        uses: codecov/codecov-action@v2
-        with:
-          directory: ./coverage
-          verbose: true
