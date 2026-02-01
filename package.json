@@ -1,6 +1,6 @@
 {
   "name": "@saber2pr/ts-context-mcp",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "TypeScript-native MCP server for generating token-efficient AI context and dependency maps.",
   "repository": {
     "type": "git",
