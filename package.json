@@ -1,0 +1,45 @@
+{
+  "name": "@saber2pr/ts-context-mcp",
+  "version": "0.0.1",
+  "description": "TypeScript-native MCP server for generating token-efficient AI context and dependency maps.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Saber2pr/ts-context-mcp"
+  },
+  "author": "saber2pr",
+  "license": "ISC",
+  "files": [
+    "lib"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "main": "./lib/index.js",
+  "scripts": {
+    "test": "vitest",
+    "test:dev": "node lib/test",
+    "start": "tsc --watch",
+    "prepublishOnly": "tsc",
+    "lint": "prettier --write ./src",
+    "prepare": "husky install"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^16.3.3",
+    "husky": "^7.0.2",
+    "jest": "^24.8.0",
+    "lint-staged": "^11.1.2",
+    "prettier": "^2.4.1",
+    "vitest": "^4.0.18"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "yarn lint",
+      "git add ."
+    ]
+  }
+}
