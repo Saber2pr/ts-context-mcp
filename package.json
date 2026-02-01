@@ -21,7 +21,7 @@
     "test:dev": "node lib/test",
     "start": "tsc --watch",
     "build": "tsc",
-    "prepublishOnly": "build",
+    "prepublishOnly": "yarn build",
     "lint": "prettier --write ./src",
     "prepare": "husky install"
   },
