@@ -140,4 +140,28 @@ describe('PromptEngine Core Logic', () => {
     expect(skeleton).toContain("export * from './math'; // re-export");
     expect(skeleton).toContain("export { run } from './app'; // re-export");
   });
+
+  it('应该能提取指定方法或函数的具体实现代码', () => {
+    const filePath = 'impl-test.ts';
+
+    // A. 测试提取类方法 (修正了 logic 匹配)
+    const classMethodImpl = engine.getMethodImplementation(filePath, 'calculate');
+    expect(classMethodImpl).toContain('public calculate(a: number, b: number)');
+    expect(classMethodImpl).toContain('const sum = a + b;');
+    expect(classMethodImpl).toContain('return sum + this.base;');
+
+    // B. 测试提取普通导出的函数
+    const funcImpl = engine.getMethodImplementation(filePath, 'globalHelper');
+    expect(funcImpl).toContain('export function globalHelper()');
+    expect(funcImpl).toContain('console.log("helper")');
+
+    // C. 测试提取变量形式的箭头函数 (由于引擎修复，现在包含 export const)
+    const arrowImpl = engine.getMethodImplementation(filePath, 'arrowFunc');
+    expect(arrowImpl).toContain('export const arrowFunc = () =>');
+    expect(arrowImpl).toContain('return "arrow"');
+
+    // D. 边界情况
+    const notFound = engine.getMethodImplementation(filePath, 'nonExistent');
+    expect(notFound).toBe(`Definition for 'nonExistent' not found in ${filePath}`);
+  });
 });
