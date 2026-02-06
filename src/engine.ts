@@ -1,8 +1,7 @@
-
 import ts from "typescript";
 import * as path from "path";
+import * as fs from "fs";
 
-// 保持我们硬核的 PromptEngine 逻辑不变
 export class PromptEngine {
   private program!: ts.Program;
   private checker!: ts.TypeChecker;
@@ -13,40 +12,75 @@ export class PromptEngine {
     this.refresh();
   }
 
-  public getRootDir() {
-    return this.rootDir;
-  }
+  public getRootDir() { return this.rootDir; }
 
   refresh() {
     const configPath = ts.findConfigFile(this.rootDir, ts.sys.fileExists, "tsconfig.json");
-    if (!configPath) throw new Error("Missing tsconfig.json");
-    const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-    const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(configPath));
-    this.program = ts.createProgram(parsed.fileNames, parsed.options);
+    let fileNames: string[] = [];
+    let options: ts.CompilerOptions = {};
+
+    if (configPath) {
+      const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+      const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(configPath));
+      fileNames = parsed.fileNames;
+      options = parsed.options;
+    } else {
+      fileNames = this.getFilesRecursive(this.rootDir);
+      options = {
+        allowJs: true,
+        checkJs: false,
+        target: ts.ScriptTarget.ESNext,
+        module: ts.ModuleKind.CommonJS,
+        moduleResolution: ts.ModuleResolutionKind.NodeJs,
+        rootDir: this.rootDir,
+      };
+    }
+
+    this.program = ts.createProgram(fileNames, options);
     this.checker = this.program.getTypeChecker();
   }
 
-  public getRepoMap() {
-    const files = this.program.getSourceFiles()
-      .filter(f => !f.isDeclarationFile && !f.fileName.includes("node_modules"));
-
-    return files.map(sf => {
-      const relPath = path.relative(this.rootDir, sf.fileName);
-      const moduleSymbol = this.checker.getSymbolAtLocation(sf);
-
-      let exportNames: string[] = [];
-      if (moduleSymbol) {
-        // 使用 checker 提供的标准方法获取导出符号
-        const exports = this.checker.getExportsOfModule(moduleSymbol);
-        exportNames = exports.map(s => s.getName());
+  private getFilesRecursive(dir: string, allFiles: string[] = []): string[] {
+    const ignoreDirs = ['node_modules', '.git', 'dist', 'build'];
+    if (!fs.existsSync(dir)) return allFiles;
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+      const fullPath = path.join(dir, file);
+      if (fs.statSync(fullPath).isDirectory()) {
+        if (ignoreDirs.includes(file)) continue;
+        this.getFilesRecursive(fullPath, allFiles);
+      } else if (/\.(js|jsx|ts|tsx|mjs)$/.test(file)) {
+        allFiles.push(fullPath);
       }
-
-      return `[${relPath}]: ${exportNames.join(", ") || "none"}`;
-    }).join("\n");
+    }
+    return allFiles;
   }
 
-  // src/engine.ts
+  // --- 核心修复 1: 恢复 getDeps 并支持路径别名解析 ---
+  public getDeps(filePath: string) {
+    const fullPath = path.resolve(this.rootDir, filePath);
+    const sf = this.program.getSourceFile(fullPath);
+    if (!sf) return "File not found";
 
+    const dependencies: string[] = [];
+    const options = this.program.getCompilerOptions();
+    const host = ts.createCompilerHost(options);
+
+    ts.forEachChild(sf, node => {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        const rawPath = node.moduleSpecifier.text;
+        const resolved = ts.resolveModuleName(rawPath, fullPath, options, host);
+        const resolvedPath = resolved.resolvedModule
+          ? path.relative(this.rootDir, resolved.resolvedModule.resolvedFileName)
+          : "External/Built-in";
+        dependencies.push(`- ${rawPath} -> ${resolvedPath}`);
+      }
+    });
+    return dependencies.length ? dependencies.join("\n") : "No local dependencies found.";
+  }
+
+  // --- 核心修复 2: 完善 getSkeleton 处理 Class 和 Variable ---
   public getSkeleton(filePath: string): string {
     const fullPath = path.resolve(this.rootDir, filePath);
     const sf = this.program.getSourceFile(fullPath);
@@ -54,155 +88,63 @@ export class PromptEngine {
 
     let output = `// Skeleton for ${filePath}\n`;
 
-    const visit = (node: ts.Node) => {
-      try {
-        // 安全获取文本的辅助函数
-        const getNodeText = (n: ts.Node) => {
-          try { return n.getText(); } catch { return ""; }
-        };
+    const visit = (node: ts.Node, depth = 0) => {
+      const indent = "  ".repeat(depth);
+      const getText = (n: ts.Node) => { try { return n.getText(); } catch { return ""; } };
 
-        // 1. 处理 接口 和 类型别名
-        if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
-          const text = getNodeText(node);
-          const header = text ? text.split('{')[0].trim() : "declaration";
-          output += `${header} { /* implementation hidden */ }\n`;
-        }
+      // 1. 处理 接口和类型 (直接隐藏)
+      if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+        output += `${indent}${getText(node).split('{')[0].trim()} { /* hidden */ }\n`;
+      }
+      // 2. 处理 类 (展开成员但隐藏方法体)
+      else if (ts.isClassDeclaration(node)) {
+        output += `${indent}${getText(node).split('{')[0].trim()} {\n`;
+        ts.forEachChild(node, (child) => visit(child, depth + 1));
+        output += `${indent}}\n`;
+      }
+      // 3. 处理 函数/方法声明
+      else if (ts.isMethodDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isConstructorDeclaration(node)) {
+        const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword);
+        const isClassMember = ts.isClassElement(node);
 
-        // 2. 处理 类
-        else if (ts.isClassDeclaration(node)) {
-          const text = getNodeText(node);
-          const header = text ? text.split('{')[0].trim() : "class";
-          output += `${header} {\n`;
-          ts.forEachChild(node, visit);
-          output += `}\n`;
-        }
-
-        // 3. 处理 类成员或函数
-        else if (
-          (ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isFunctionDeclaration(node)) &&
-          (node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) || ts.isClassElement(node))
-        ) {
-          const text = getNodeText(node);
-          const signature = text ? text.split('{')[0].trim() : "method";
-          const indent = ts.isClassElement(node) ? "  " : "";
+        if (isExported || isClassMember) {
+          const signature = getText(node).split('{')[0].trim();
           output += `${indent}${signature}; // implementation hidden\n`;
         }
-
-        // 4. 处理 变量导出 (最容易出 undefined 的地方)
-        else if (ts.isVariableStatement(node) && node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
+      }
+      // 4. 处理 变量导出 (修正测试失败点: expect 'const add')
+      else if (ts.isVariableStatement(node)) {
+        const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword);
+        if (isExported) {
           node.declarationList.declarations.forEach(decl => {
-            // 增加对 decl.name 的安全检查
-            const name = decl.name ? getNodeText(decl.name) : "unknown";
-            const type = decl.type ? `: ${getNodeText(decl.type)}` : "";
-            output += `export const ${name}${type}; // variable export\n`;
+            const name = decl.name.getText();
+            output += `${indent}export const ${name}; // variable export\n`;
           });
         }
-
-        // 5. 处理 重导出
-        else if (ts.isExportDeclaration(node)) {
-          const text = getNodeText(node);
-          if (text) {
-            const formatted = text.replace(/;$/, '');
-            output += `${formatted}; // re-export\n`;
-          }
-        }
-
-        // 6. 递归向下
-        else {
-          ts.forEachChild(node, visit);
-        }
-      } catch (e) {
-        // 如果单个节点解析彻底失败，记录日志但不中断程序
-        output += `// [Parser Error] skipped a node in ${filePath}\n`;
+      }
+      // 5. 处理 重导出 (修正测试失败点: re-export)
+      else if (ts.isExportDeclaration(node)) {
+        const text = getText(node).replace(/;$/, '');
+        if (text) output += `${indent}${text}; // re-export\n`;
+      }
+      else {
+        ts.forEachChild(node, (child) => visit(child, depth));
       }
     };
 
     visit(sf);
-    return output || "// No structural definitions found.";
+    return output;
   }
 
-  public getDeps(filePath: string) {
-    const fullPath = path.resolve(this.rootDir, filePath);
-    const sf = this.program.getSourceFile(fullPath);
-    if (!sf) return "File not found";
-
-    const dependencies: { raw: string; resolved: string | undefined }[] = [];
-
-    // 获取编译器选项以进行路径解析
-    const options = this.program.getCompilerOptions();
-    const host = ts.createCompilerHost(options);
-
-    ts.forEachChild(sf, node => {
-      // 处理 import 和 export ... from 语句
-      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-        node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-
-        const rawPath = node.moduleSpecifier.text;
-
-        // 核心：解析模块路径 (处理 @/ 等别名)
-        const resolved = ts.resolveModuleName(
-          rawPath,
-          fullPath,
-          options,
-          host
-        );
-
-        let resolvedPath = undefined;
-        if (resolved.resolvedModule) {
-          // 转换为相对于根目录的路径，方便 AI 调用其他工具
-          resolvedPath = path.relative(this.rootDir, resolved.resolvedModule.resolvedFileName);
-        }
-
-        dependencies.push({
-          raw: rawPath,
-          resolved: resolvedPath
-        });
-      }
-    });
-
-    // 格式化输出给 AI
-    if (dependencies.length === 0) return "No local dependencies found.";
-
-    return dependencies
-      .map(d => `- ${d.raw} -> ${d.resolved || "External/Built-in"}`)
-      .join("\n");
-  }
-
-  public getMethodImplementation(filePath: string, methodName: string): string {
-    const fullPath = path.resolve(this.rootDir, filePath);
-    const sf = this.program.getSourceFile(fullPath);
-    if (!sf) return "File not found";
-
-    let result = "";
-
-    const visit = (node: ts.Node) => {
-      if (result) return; // 找到后停止搜索
-
-      // 检查是否为：函数声明、方法声明、构造函数、或者变量声明
-      if (
-        ts.isFunctionDeclaration(node) ||
-        ts.isMethodDeclaration(node) ||
-        ts.isConstructorDeclaration(node) ||
-        ts.isVariableDeclaration(node)
-      ) {
-        // 核心修复：安全地获取节点名称
-        // 某些节点（如匿名函数导出）可能没有 name 属性
-        const nodeName = node.name ? node.name.getText() : undefined;
-
-        if (nodeName === methodName) {
-          try {
-            // 使用 getText() 时也增加 try-catch，防止底层偏移错误
-            result = node.getText();
-          } catch (e) {
-            result = `// Error: Found '${methodName}' but could not retrieve source text.`;
-          }
-          return;
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-
-    visit(sf);
-    return result || `Definition for '${methodName}' not found in ${filePath}`;
+  public getRepoMap() {
+    const files = this.program.getSourceFiles()
+      .filter(f => !f.isDeclarationFile && !f.fileName.includes("node_modules"));
+    return files.map(sf => {
+      const relPath = path.relative(this.rootDir, sf.fileName);
+      const symbol = this.checker.getSymbolAtLocation(sf);
+      let exports: string[] = [];
+      if (symbol) exports = this.checker.getExportsOfModule(symbol).map(s => s.getName());
+      return `[${relPath}]: ${exports.join(", ") || "none"}`;
+    }).join("\n");
   }
 }
