@@ -1,4 +1,4 @@
-import ts from "typescript";
+import ts from "typescript/lib/typescript";
 import * as path from "path";
 import * as fs from "fs";
 
