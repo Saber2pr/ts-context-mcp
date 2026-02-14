@@ -102,22 +102,51 @@ export class PromptEngine {
       const sf = this.program?.getSourceFile(fullPath);
       if (sf) {
         let result = '';
+        let importedSource = ''; // 用于记录导入来源
+
         const visit = (node: ts.Node) => {
-          if (result) return;
-          if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isVariableDeclaration(node)) && node.name?.getText() === methodName) {
-            if (ts.isVariableDeclaration(node) && node.parent?.parent && ts.isVariableStatement(node.parent.parent)) {
-              result = node.parent.parent.getText();
-            } else {
-              result = node.getText();
-            }
+          if (result || importedSource) return;
+
+          // 1. 查找本地定义 (原有逻辑)
+          if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) ||
+            ts.isConstructorDeclaration(node) || ts.isVariableDeclaration(node)) &&
+            node.name?.getText() === methodName) {
+            result = ts.isVariableDeclaration(node) && node.parent?.parent && ts.isVariableStatement(node.parent.parent)
+              ? node.parent.parent.getText()
+              : node.getText();
             return;
           }
+
+          // 2. 查找导入语句 (新增逻辑)
+          if (ts.isImportDeclaration(node) && node.importClause) {
+            const namedBindings = node.importClause.namedBindings;
+            // 处理 import { methodName } from '...'
+            if (namedBindings && ts.isNamedImports(namedBindings)) {
+              const hasExport = namedBindings.elements.some(e => e.name.getText() === methodName);
+              if (hasExport) {
+                importedSource = (node.moduleSpecifier as ts.StringLiteral).text;
+                return;
+              }
+            }
+            // 处理 import methodName from '...'
+            if (node.importClause.name?.getText() === methodName) {
+              importedSource = (node.moduleSpecifier as ts.StringLiteral).text;
+              return;
+            }
+          }
+
           ts.forEachChild(node, visit);
         };
+
         visit(sf);
+
         if (result) return result;
+
+        // 如果本地找不到但发现是导入的
+        if (importedSource) {
+          return `Method '${methodName}' is not defined in this file, but imported from: '${importedSource}'. \nPlease use 'analyze_deps' or read the source file to find its implementation.`;
+        }
       }
-      // 保持测试要求的返回格式
       return `Definition for '${methodName}' not found in ${filePath}`;
     } catch {
       return `Definition for '${methodName}' not found in ${filePath}`;
